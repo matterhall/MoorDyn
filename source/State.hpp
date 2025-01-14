@@ -252,6 +252,9 @@ class MoorDynState
 	/// The states of the lines
 	std::vector<LineState> lines;
 
+	/// The state derivatives of misc states: VIV, viscoelastic, blank (acc is dummy variable)
+	std::vector<LineState> misc;
+
 	/// The states of the points
 	std::vector<PointState> points;
 
@@ -305,6 +308,9 @@ class DMoorDynStateDt
   public:
 	/// The state derivatives of the lines
 	std::vector<DLineStateDt> lines;
+
+	/// The state derivatives of misc states: VIV, viscoelastic, blank (acc is dummy variable)
+	std::vector<DLineStateDt> misc;
 
 	/// The state derivatives of the points
 	std::vector<DPointStateDt> points;
@@ -452,6 +458,19 @@ butcher_row(MoorDynState& out_state,
 			for (unsigned int j = 0; j < N; j++) {
 				line.pos[i] += scales[j] * derivs[j]->lines[lineIdx].vel[i];
 				line.vel[i] += scales[j] * derivs[j]->lines[lineIdx].acc[i];
+			}
+		}
+	}
+
+	for (unsigned int miscIdx = 0; miscIdx < out_state.misc.size();
+	     miscIdx++) {
+		auto& misc = out_state.misc[miscIdx];
+		for (unsigned int i = 0; i < misc.pos.size(); i++) {
+			misc.pos[i] = start_state.misc[miscIdx].pos[i];
+			misc.vel[i] = start_state.misc[miscIdx].vel[i];
+			for (unsigned int j = 0; j < N; j++) {
+				misc.pos[i] += scales[j] * derivs[j]->misc[miscIdx].vel[i];
+				misc.vel[i] += scales[j] * derivs[j]->misc[miscIdx].acc[i];
 			}
 		}
 	}

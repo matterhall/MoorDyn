@@ -85,7 +85,7 @@ TimeSchemeBase<NSTATE, NDERIV>::Update(real t_local, unsigned int substep)
 
 	for (unsigned int i = 0; i < lines.size(); i++) {
 		lines[i]->setTime(this->t);
-		lines[i]->setState(r[substep].lines[i].pos, r[substep].lines[i].vel);
+		lines[i]->setState(r[substep].lines[i].pos, r[substep].lines[i].vel, r[substep].misc[i].pos);
 	}
 }
 
@@ -99,7 +99,8 @@ TimeSchemeBase<NSTATE, NDERIV>::CalcStateDeriv(unsigned int substep)
 		if (!_calc_mask.lines[i])
 			continue;
 		lines[i]->getStateDeriv(rd[substep].lines[i].vel,
-		                        rd[substep].lines[i].acc);
+		                        rd[substep].lines[i].acc,
+								rd[substep].misc[i].vel);
 	}
 
 	for (unsigned int i = 0; i < points.size(); i++) {

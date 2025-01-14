@@ -603,6 +603,10 @@ MoorDynState::AsString() const
 		s << "Line " << i << ":" << endl;
 		s << lines[i].AsString();
 	}
+	for (unsigned int i = 0; i < misc.size(); i++) {
+		s << "Misc " << i << ":" << endl;
+		s << misc[i].AsString();
+	}
 	for (unsigned int i = 0; i < points.size(); i++) {
 		s << "Point " << i << ":" << endl;
 		s << points[i].AsString();
@@ -626,6 +630,10 @@ MoorDynState::operator=(const MoorDynState& rhs)
 	lines.reserve(rhs.lines.size());
 	for (auto l : rhs.lines)
 		lines.push_back(l);
+	misc.clear();
+	misc.reserve(rhs.misc.size());
+	for (auto l : rhs.misc)
+		misc.push_back(l);
 	points.clear();
 	points.reserve(rhs.points.size());
 	for (auto l : rhs.points)
@@ -652,6 +660,11 @@ MoorDynState::operator+(const MoorDynState& rhs)
 	out.lines.reserve(lines.size());
 	for (unsigned int i = 0; i < lines.size(); i++)
 		out.lines.push_back(lines[i] + rhs.lines[i]);
+	if (misc.size() != rhs.misc.size())
+		throw moordyn::invalid_value_error("Invalid input size");
+	out.misc.reserve(misc.size());
+	for (unsigned int i = 0; i < misc.size(); i++)
+		out.misc.push_back(misc[i] + rhs.misc[i]);
 	if (points.size() != rhs.points.size())
 		throw moordyn::invalid_value_error("Invalid input size");
 	out.points.reserve(points.size());
@@ -681,6 +694,11 @@ MoorDynState::operator-(const MoorDynState& rhs)
 	out.lines.reserve(lines.size());
 	for (unsigned int i = 0; i < lines.size(); i++)
 		out.lines.push_back(lines[i] - rhs.lines[i]);
+	if (misc.size() != rhs.misc.size())
+		throw moordyn::invalid_value_error("Invalid input size");
+	out.misc.reserve(misc.size());
+	for (unsigned int i = 0; i < misc.size(); i++)
+		out.misc.push_back(misc[i] - rhs.misc[i]);
 	if (points.size() != rhs.points.size())
 		throw moordyn::invalid_value_error("Invalid input size");
 	out.points.reserve(points.size());
@@ -721,6 +739,10 @@ DMoorDynStateDt::AsString() const
 		s << "Line " << i << ":" << endl;
 		s << lines[i].AsString();
 	}
+	for (unsigned int i = 0; i < misc.size(); i++) {
+		s << "Misc " << i << ":" << endl;
+		s << misc[i].AsString();
+	}
 	for (unsigned int i = 0; i < points.size(); i++) {
 		s << "Point " << i << ":" << endl;
 		s << points[i].AsString();
@@ -744,6 +766,10 @@ DMoorDynStateDt::operator=(const DMoorDynStateDt& rhs)
 	lines.reserve(rhs.lines.size());
 	for (auto l : rhs.lines)
 		lines.push_back(l);
+	misc.clear();
+	misc.reserve(rhs.misc.size());
+	for (auto l : rhs.misc)
+		misc.push_back(l);
 	points.clear();
 	points.reserve(rhs.points.size());
 	for (auto l : rhs.points)
@@ -768,6 +794,9 @@ DMoorDynStateDt::operator*(const real& dt)
 	out.lines.reserve(lines.size());
 	for (unsigned int i = 0; i < lines.size(); i++)
 		out.lines.push_back(lines[i] * dt);
+	out.misc.reserve(misc.size());
+	for (unsigned int i = 0; i < misc.size(); i++)
+		out.misc.push_back(misc[i] * dt);
 	out.points.reserve(points.size());
 	for (unsigned int i = 0; i < points.size(); i++)
 		out.points.push_back(points[i] * dt);
@@ -791,6 +820,11 @@ DMoorDynStateDt::operator+(const DMoorDynStateDt& rhs)
 	out.lines.reserve(lines.size());
 	for (unsigned int i = 0; i < lines.size(); i++)
 		out.lines.push_back(lines[i] + rhs.lines[i]);
+	if (misc.size() != rhs.misc.size())
+		throw moordyn::invalid_value_error("Invalid input size");
+	out.misc.reserve(misc.size());
+	for (unsigned int i = 0; i < misc.size(); i++)
+		out.misc.push_back(misc[i] + rhs.misc[i]);
 	if (points.size() != rhs.points.size())
 		throw moordyn::invalid_value_error("Invalid input size");
 	out.points.reserve(points.size());
@@ -820,6 +854,11 @@ DMoorDynStateDt::operator-(const DMoorDynStateDt& rhs)
 	out.lines.reserve(lines.size());
 	for (unsigned int i = 0; i < lines.size(); i++)
 		out.lines.push_back(lines[i] - rhs.lines[i]);
+	if (misc.size() != rhs.misc.size())
+		throw moordyn::invalid_value_error("Invalid input size");
+	out.misc.reserve(misc.size());
+	for (unsigned int i = 0; i < misc.size(); i++)
+		out.misc.push_back(misc[i] - rhs.misc[i]);
 	if (points.size() != rhs.points.size())
 		throw moordyn::invalid_value_error("Invalid input size");
 	out.points.reserve(points.size());

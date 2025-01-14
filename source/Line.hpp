@@ -83,18 +83,18 @@ class Line final : public io::IO, public NatFreqCFL
 	~Line();
 
   private:
-	/** @brief Get the non-linear Young's modulus. This is interpolated from a
+	/** @brief Get the non-linear stiffness. This is interpolated from a
 	 * curve provided in the input file.
 	 * @param l_stretched The actual length of the segment
 	 * @param l_unstretched The unstretched length of the segment
 	 */
-	real getNonlinearE(real l_stretched, real l_unstretched) const;
+	real getNonlinearEA(real l_stretched, real l_unstretched) const;
 
 	/** @brief Get the non-linear Damping coefficient
 	 * @param ld_stretched The segment rate of stretch
 	 * @param l_unstretched The unstretched length of the segment
 	 */
-	real getNonlinearC(real ld_stretched, real l_unstretched) const;
+	real getNonlinearBA(real ld_stretched, real l_unstretched) const;
 
 	/** @brief Get the non-linear bending stiffness
 	 * @param curv The curvature
@@ -140,19 +140,32 @@ class Line final : public io::IO, public NatFreqCFL
 	moordyn::real d;
 	/// line density (kg/m^3)
 	moordyn::real rho;
-	/// line elasticity modulus (Young's modulus) [Pa]
-	moordyn::real E;
+	/// Elasticity model flag
+	unsigned int ElasticMod;
+	/// line normal/static elasticity modulus (Young's modulus) [Pa]
+	moordyn::real EA; // TODO: units
+	/// constant line dynamic stiffness modulus * area for viscoelastic stuff
+	moordyn::real EA_D;
+	/// Alpha * MBL in load dependent dynamic stiffness equation Kd = Alpha * MBL + vbeta * Lm for viscoelastic model
+    moordyn::real alphaMBL; 
+	/// beta in load dependent dynamic stiffness equation Kd = Alpha * MBL + vbeta * Lm for viscoelastic model
+	moordyn::real vbeta;
+	/// stiffness of spring 2 in viscoelastic model (dynamic stiffness). This is the spring in series with the parallel spring-dashpot.
+	/// if ElasticMod = 2, EA_2 = EA_D. If ElasticMod = 3, EA_2 is load dependent dynamic stiffness.
+	moordyn::real EA_2;
 	/// line bending stiffness [Nm^2]
 	moordyn::real EI;
-	/** line axial internal damping coefficient [Ns]
+	/** line axial internal damping coefficient [Pa-s]
 	 *
-	 * The provided value in moordyn::Line::props::c can be either the literal
+	 * The provided value in moordyn::Line::props::BA can be either the literal
 	 * damping coefficient, or a negative value in which case it represents the
-	 * fraction of the critical damping,
+	 * fraction of the critical damping * area,
 	 *
 	 * \f$ C_{crit} = \frac{l}{n} \sqrt{\rho E} \f$
 	 */
-	moordyn::real c;
+	moordyn::real BA;
+	/// Line axial damping coefficient corresponding to the dynamic spring in the viscoelastic model
+	moordyn::real BA_D;
 	/// normal added mass coefficient [-]
 	/// with respect to line displacement
 	moordyn::real Can;
@@ -165,6 +178,17 @@ class Line final : public io::IO, public NatFreqCFL
 	/// axial drag coefficient [-]
 	/// with respect to surface area, \f$ \pi d l \f$
 	moordyn::real Cdt;
+	/// VIV lift coefficient [-]
+	/// If 0, VIV turned off
+	moordyn::real Cl;
+	/// +- range of VIV synchronization [-]
+	/// in non-dimensional frequency
+	moordyn::real dF;
+	/// Center VIV synchronization [-]
+	/// in non-dimensional frequency
+	moordyn::real cF;
+	/// The crossflow motion phase [-]
+	real phi_yd; 
 
 	/// line axial internal damping coefficient (before proceessing) [Ns]
 	moordyn::real BAin;
@@ -183,7 +207,7 @@ class Line final : public io::IO, public NatFreqCFL
 	/// y array for bent stiffness lookup table
 	std::vector<moordyn::real> bstiffYs;
 	/// number of values in stress-strainrate lookup table (0 for constant c)
-	unsigned int nCpoints;
+	unsigned int nBApoints;
 	/// x array for stress-strainrate lookup table
 	std::vector<moordyn::real> dampXs;
 	/// y array for stress-strainrate lookup table
@@ -243,6 +267,8 @@ class Line final : public io::IO, public NatFreqCFL
 	std::vector<vec> Aq;
 	/// node bottom contact force
 	std::vector<vec> B;
+	/// crossflow viv lift force
+	std::vector<vec> Lf;
 	/// total force on node
 	std::vector<vec> Fnet;
 
@@ -253,6 +279,30 @@ class Line final : public io::IO, public NatFreqCFL
 	// time
 	/// simulation time
 	moordyn::real t;
+	/// MoorDyn internal time step
+	moordyn::real dtm;
+	
+	// VIV stuff
+	// /// VIV amplitude updated every zero crossing of crossflow velcoity
+	// std::vector<moordyn::real> Amp;
+	/// Misc states (viv phase,viscoelastic,unused)
+	std::vector<vec> Misc;
+	/// derivative of Misc states (viv phase,viscoelastic,unused)
+	std::vector<vec> Miscd;
+	/// Num timesteps for rolling RMS of crossflow velocity phase
+	const unsigned int n_m = 500;
+
+	// back indexing one dtm for VIV
+	/// old t
+	moordyn::real t_old = 0.0;
+	// /// running amplitude total, from previous zero crossing of yd
+	// std::vector<moordyn::real> A_int_old;
+	/// node old cf vel rms
+	std::vector<moordyn::real> yd_rms_old;
+	/// node old cf accel rms
+	std::vector<moordyn::real> ydd_rms_old;
+	/// node old accelerations
+	std::vector<vec> rdd_old;
 
 	// end conditions
 	/** @brief Types of end points
@@ -313,6 +363,9 @@ class Line final : public io::IO, public NatFreqCFL
 	/// lines
 	size_t lineId;
 
+	/// boolean to indicate dynamic relaxation occuring
+	bool IC_gen = false;
+
 	/** @brief Setup a line
 	 * @param number Line number
 	 * @param props Line properties
@@ -321,6 +374,7 @@ class Line final : public io::IO, public NatFreqCFL
 	 * @param env_in Global struct that holds environmental settings
 	 * @param outfile The outfile where information shall be written
 	 * @param channels The channels/fields that shall be printed in the file
+	 * @param moordyn internal timestep. Used in VIV
 	 */
 	void setup(int number,
 	           LineProps* props,
@@ -328,7 +382,8 @@ class Line final : public io::IO, public NatFreqCFL
 	           unsigned int n,
 	           EnvCondRef env_in,
 	           shared_ptr<ofstream> outfile,
-	           string channels);
+	           string channels,
+			   real dtM0);
 
 	/** @brief Set the environmental data
 	 * @param waves_in Global Waves object
@@ -344,12 +399,12 @@ class Line final : public io::IO, public NatFreqCFL
 
 	/** @brief Compute the stationary Initial Condition (IC)
 	 * @return The states, i.e. the positions of the internal nodes
-	 * (first) and the velocities of the internal nodes (second)
+	 * (first) and the velocities of the internal nodes (second) and the viv states (third)
 	 * @throws moordyn::output_file_error If an outfile has been provided, but
 	 * it cannot be written
 	 * @throws invalid_value_error If there is no enough water depth
 	 */
-	std::pair<std::vector<vec>, std::vector<vec>> initialize();
+	std::tuple<std::vector<vec>, std::vector<vec>, std::vector<vec>> initialize();
 
 	/** @brief Number of segments
 	 *
@@ -422,7 +477,7 @@ class Line final : public io::IO, public NatFreqCFL
 	 * @return The constant stiffness EA value
 	 * @see ::IsConstantEA()
 	 */
-	inline moordyn::real getConstantEA() const { return E * A; }
+	inline moordyn::real getConstantEA() const { return EA; }
 
 	/** @brief Set the constant stiffness of the line
 	 *
@@ -430,7 +485,7 @@ class Line final : public io::IO, public NatFreqCFL
 	 * @param EA The constant stiffness EA value
 	 * @see ::IsConstantEA()
 	 */
-	inline void setConstantEA(moordyn::real EA) { E = EA / A; }
+	inline void setConstantEA(moordyn::real EA) { EA = EA; }
 
 	/** @brief Get the position of a node
 	 * @param i The line node index
@@ -812,11 +867,12 @@ class Line final : public io::IO, public NatFreqCFL
 	/** @brief Set the line state
 	 * @param r The moordyn::Line::getN() - 1 positions
 	 * @param u The moordyn::Line::getN() - 1 velocities
+	 * @param v The moordyn::Line::getN() + 1 viv properties
 	 * @note This method is not affecting the line end points
 	 * @see moordyn::Line::setEndState
 	 * @throws invalid_value_error If either @p r or @p u have wrong sizes
 	 */
-	void setState(const std::vector<vec>& r, const std::vector<vec>& u);
+	void setState(const std::vector<vec>& r, const std::vector<vec>& u, const std::vector<vec>& v);
 
 	/** @brief Set the position and velocity of an end point
 	 * @param r Position
@@ -857,10 +913,11 @@ class Line final : public io::IO, public NatFreqCFL
 
 	/** @brief Calculate forces and get the derivative of the line's states
 	 * @param vel Where to store the velocities of the internal nodes
-	 * @param acc Where to store the accelerations of the internal nodes
+	 * @param acc Where to store the accelerations of the internal nodes 
+	 * @param misc Where to store the misc states of lines (viv phase, viscoelastic, unused)
 	 * @throws nan_error If nan values are detected in any node position
 	 */
-	void getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc);
+	void getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc, std::vector<vec>& misc);
 
 	// void initiateStep(vector<double> &rFairIn, vector<double> &rdFairIn,
 	// double time);

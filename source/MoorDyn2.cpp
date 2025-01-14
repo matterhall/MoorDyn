@@ -249,7 +249,7 @@ moordyn::MoorDyn::icLegacy()
 			}
 			MOORDYN_CATCHER(err, err_msg);
 			if (err != MOORDYN_SUCCESS) {
-				LOGERR << "t = " << t << " s" << endl;
+				LOGERR << "Dynam Relax t = " << t << " s: " << err_msg << endl;
 				return err;
 			}
 		}
@@ -546,6 +546,11 @@ moordyn::MoorDyn::Init(const double* x, const double* xd, bool skip_ic)
 
 	// ------------------ do IC gen --------------------
 	if (!skip_ic) {
+
+		for (unsigned int l = 0; l < LineList.size(); l++){
+			LineList[l]->IC_gen = true; // turn on IC_gen flag
+		}
+
 		moordyn::error_id err;
 		if (ICgenDynamic)
 			err = icLegacy();
@@ -553,6 +558,11 @@ moordyn::MoorDyn::Init(const double* x, const double* xd, bool skip_ic)
 			err = icStationary();
 		if (err != MOORDYN_SUCCESS)
 			return err;
+		
+		for (unsigned int l = 0; l < LineList.size(); l++){
+			LineList[l]->IC_gen = false; // turn off IC_gen flag
+		}
+
 	} else {
 		_t_integrator->Init();
 		if (ICfile != "") {
@@ -578,6 +588,7 @@ moordyn::MoorDyn::Init(const double* x, const double* xd, bool skip_ic)
 		if (seafloor) {
 			env->WtrDpth = -seafloor->getAverageDepth();
 		}
+		LOGMSG << "Water kinematics for runtime:" << endl;
 		waves->setup(env, seafloor, _t_integrator, _basepath.c_str());
 		env->WtrDpth = tmp;
 	}
@@ -1102,7 +1113,7 @@ moordyn::MoorDyn::ReadInFile()
 			// Note - this is not in MD-F
 			if (r0[2] < -env->WtrDpth) {
 				env->WtrDpth = -r0[2];
-				LOGWRN << "\t Water depth set to point " << PointList.size() << " z position because point was specified below the seabed" << endl;
+				LOGWRN << "\t Water depth set to point " << PointList.size()+1 << " z position because point was specified below the seabed" << endl;
 			}
 
 			LOGDBG << "\t'" << number << "'"
@@ -1183,7 +1194,7 @@ moordyn::MoorDyn::ReadInFile()
 
 			// Make the output file (if queried)
 			if ((outchannels.size() > 0) &&
-			    (strcspn(outchannels.c_str(), "pvUDctsd") <
+			    (strcspn(outchannels.c_str(), "pvUDVKctsd") <
 			     strlen(outchannels.c_str()))) {
 				// if 1+ output flag chars are given and they're valid
 				stringstream oname;
@@ -1208,7 +1219,8 @@ moordyn::MoorDyn::ReadInFile()
 			           NumSegs,
 			           env,
 			           outfiles.back(),
-			           outchannels);
+			           outchannels,
+					   dtM0);
 			LineList.push_back(obj);
 			LineStateIs.push_back(
 			    nX);                 // assign start index of this Line's states
@@ -1673,6 +1685,7 @@ moordyn::MoorDyn::ReadInFile()
 		if (seafloor) {
 			env->WtrDpth = -seafloor->getAverageDepth();
 		}
+		LOGMSG << "Water kinematics for IC gen:" << endl;
 		waves->setup(env, seafloor, _t_integrator, _basepath.c_str());
 		env->WtrDpth = tmp;
 	}
@@ -1759,18 +1772,62 @@ moordyn::MoorDyn::readLineProps(string inputText)
 	obj->Can = atof(entries[7].c_str());
 	obj->Cdt = atof(entries[8].c_str());
 	obj->Cat = atof(entries[9].c_str());
+	if (entries.size() == 10) {
+		obj->Cl = 0.0; // If no lift coefficient, disable VIV. For backwards compatability.
+		obj->dF = 0.0;
+		obj->cF = 0.0;
+	} else if (entries.size() == 11) {
+		obj->Cl = atof(entries[10].c_str());
+		obj->dF = 0.08; // set to default Thorsen synchronization range if not provided
+		obj->cF = 0.18; // set to default Thorsen synchronization centering if not provided
+	} else if (entries.size() == 13) {
+		obj->Cl = atof(entries[10].c_str());
+		obj->dF = atof(entries[11].c_str());
+		obj->cF = atof(entries[12].c_str());
+	} else return nullptr;
 
 	moordyn::error_id err;
-	err = read_curve(entries[3].c_str(),
-	                 &(obj->EA),
-	                 &(obj->nEApoints),
-	                 obj->stiffXs,
-	                 obj->stiffYs);
+	vector<string> EA_stuff = moordyn::str::split(entries[3],'|');
+	const int EA_N = EA_stuff.size();
+	if (EA_N == 1) {
+		obj->ElasticMod = 1; // normal case
+	}
+	else if (EA_N==2){
+		obj->ElasticMod = 2; // viscoelastic model, constant dynamic stiffness
+		obj->EA_D = atof(EA_stuff[1].c_str());
+	} else if (EA_N==3){
+		obj->ElasticMod = 3; // viscoelastic model load dependent dynamic stiffness
+		obj->alphaMBL = atof(EA_stuff[1].c_str());
+		obj->vbeta = atof(EA_stuff[2].c_str());
+	} else {
+		LOGERR << "A line type EA entry can have at most 3 (bar-separated) values." << endl;
+		return nullptr;
+	}
+	err = read_curve(EA_stuff[0].c_str(),
+					&(obj->EA),
+					&(obj->nEApoints),
+					obj->stiffXs,
+					obj->stiffYs);
 	if (err)
 		return nullptr;
-	err = read_curve(entries[4].c_str(),
-	                 &(obj->c),
-	                 &(obj->nCpoints),
+
+	vector<string> BA_stuff = moordyn::str::split(entries[4],'|');
+	unsigned int BA_N = BA_stuff.size();
+	if (BA_N > EA_N) {
+		LOGERR << "A line type BA entry cannot have more (bar-separated) values than its EA entry." << endl;
+		return nullptr;
+	} else if (BA_N == 2){
+		obj->BA_D = atof(BA_stuff[1].c_str());
+	} else if (obj->ElasticMod>1){
+		LOGMSG << "Message: viscoelastic model being used with zero damping on the dynamic stiffness." << endl;	
+		obj->BA_D = 0.0;
+	} else if (BA_N > 2) {
+		LOGERR << "A line type BA entry can have at most 2 (bar-separated) values." << endl;
+		return nullptr;
+	}
+	err = read_curve(BA_stuff[0].c_str(),
+	                 &(obj->BA),
+	                 &(obj->nBApoints),
 	                 obj->dampXs,
 	                 obj->dampYs);
 	if (err)
@@ -1783,6 +1840,9 @@ moordyn::MoorDyn::readLineProps(string inputText)
 	if (err)
 		return nullptr;
 
+	if (obj->Cl > 0.0) nX = nX+1;
+	if (obj->ElasticMod > 1) nX = nX+1;
+
 	LOGDBG << "\t'" << obj->type << "'"
 	       << " - with id " << LinePropList.size() << endl
 	       << "\t\td   : " << obj->d << endl
@@ -1790,7 +1850,8 @@ moordyn::MoorDyn::readLineProps(string inputText)
 	       << "\t\tCdn : " << obj->Cdn << endl
 	       << "\t\tCan : " << obj->Can << endl
 	       << "\t\tCdt : " << obj->Cdt << endl
-	       << "\t\tCat : " << obj->Cat << endl;
+	       << "\t\tCat : " << obj->Cat << endl
+		   << "\t\tCl : " << obj->Cat << endl;
 	return obj;
 }
 

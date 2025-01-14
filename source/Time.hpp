@@ -355,16 +355,24 @@ class TimeSchemeBase : public TimeScheme
 		// Build up the states and states derivatives
 		unsigned int n = obj->getN() - 1;
 		LineState state;
+		LineState mstate; // misc state stuff
 		state.pos.assign(n, vec::Zero());
 		state.vel.assign(n, vec::Zero());
+		mstate.pos.assign(n+2, vec::Zero());
+		mstate.vel.assign(n+2, vec::Zero());
 		for (unsigned int i = 0; i < r.size(); i++) {
 			r[i].lines.push_back(state);
+			r[i].misc.push_back(mstate);
 		}
 		DLineStateDt dstate;
+		DLineStateDt mdstate; // misc state stuff
 		dstate.vel.assign(n, vec::Zero());
 		dstate.acc.assign(n, vec::Zero());
+		mdstate.vel.assign(n+2, vec::Zero());
+		mdstate.acc.assign(n+2, vec::Zero());
 		for (unsigned int i = 0; i < rd.size(); i++) {
 			rd[i].lines.push_back(dstate);
+			rd[i].misc.push_back(mdstate);
 		}
 		// Add the mask value
 		_calc_mask.lines.push_back(true);
@@ -384,10 +392,14 @@ class TimeSchemeBase : public TimeScheme
 		} catch (...) {
 			throw;
 		}
-		for (unsigned int i = 0; i < r.size(); i++)
+		for (unsigned int i = 0; i < r.size(); i++) {
 			r[i].lines.erase(r[i].lines.begin() + i);
-		for (unsigned int i = 0; i < rd.size(); i++)
+			r[i].misc.erase(r[i].misc.begin() + i);
+		}
+		for (unsigned int i = 0; i < rd.size(); i++) {
 			rd[i].lines.erase(rd[i].lines.begin() + i);
+			rd[i].misc.erase(rd[i].misc.begin() + i);
+		}
 		_calc_mask.lines.erase(_calc_mask.lines.begin() + i);
 		return i;
 	}
@@ -575,7 +587,7 @@ class TimeSchemeBase : public TimeScheme
 		}
 
 		for (unsigned int i = 0; i < lines.size(); i++) {
-			std::tie(r[0].lines[i].pos, r[0].lines[i].vel) =
+			std::tie(r[0].lines[i].pos, r[0].lines[i].vel, r[0].misc[i].pos) =
 			    lines[i]->initialize();
 		}
 	}
@@ -638,6 +650,8 @@ class TimeSchemeBase : public TimeScheme
 			data.insert(data.end(), subdata.begin(), subdata.end());
 			subdata = io::IO::Serialize(r[i].lines[j].vel);
 			data.insert(data.end(), subdata.begin(), subdata.end());
+			subdata = io::IO::Serialize(r[i].misc[j].pos);
+			data.insert(data.end(), subdata.begin(), subdata.end());
 		}
 		return data;
 	}
@@ -666,6 +680,7 @@ class TimeSchemeBase : public TimeScheme
 		for (unsigned int j = 0; j < lines.size(); j++) {
 			ptr = io::IO::Deserialize(ptr, r[i].lines[j].pos);
 			ptr = io::IO::Deserialize(ptr, r[i].lines[j].vel);
+			ptr = io::IO::Deserialize(ptr, r[i].misc[j].pos);
 		}
 		return ptr;
 	}
@@ -748,6 +763,8 @@ class TimeSchemeBase : public TimeScheme
 				data.insert(data.end(), subdata.begin(), subdata.end());
 				subdata = io::IO::Serialize(r[substep].lines[i].vel);
 				data.insert(data.end(), subdata.begin(), subdata.end());
+				subdata = io::IO::Serialize(r[substep].misc[i].pos);
+				data.insert(data.end(), subdata.begin(), subdata.end());
 			}
 		}
 		for (unsigned int substep = 0; substep < NDERIV; substep++) {
@@ -773,6 +790,8 @@ class TimeSchemeBase : public TimeScheme
 				subdata = io::IO::Serialize(rd[substep].lines[i].vel);
 				data.insert(data.end(), subdata.begin(), subdata.end());
 				subdata = io::IO::Serialize(rd[substep].lines[i].acc);
+				data.insert(data.end(), subdata.begin(), subdata.end());
+				subdata = io::IO::Serialize(rd[substep].misc[i].vel);
 				data.insert(data.end(), subdata.begin(), subdata.end());
 			}
 		}
@@ -812,6 +831,7 @@ class TimeSchemeBase : public TimeScheme
 			for (unsigned int i = 0; i < lines.size(); i++) {
 				ptr = io::IO::Deserialize(ptr, r[substep].lines[i].pos);
 				ptr = io::IO::Deserialize(ptr, r[substep].lines[i].vel);
+				ptr = io::IO::Deserialize(ptr, r[substep].misc[i].pos);
 			}
 		}
 		for (unsigned int substep = 0; substep < NDERIV; substep++) {
@@ -830,6 +850,7 @@ class TimeSchemeBase : public TimeScheme
 			for (unsigned int i = 0; i < lines.size(); i++) {
 				ptr = io::IO::Deserialize(ptr, rd[substep].lines[i].vel);
 				ptr = io::IO::Deserialize(ptr, rd[substep].lines[i].acc);
+				ptr = io::IO::Deserialize(ptr, rd[substep].misc[i].vel);
 			}
 		}
 
@@ -933,9 +954,10 @@ class StationaryScheme : public TimeSchemeBase<2, 1>
 	 */
 	inline unsigned int NStates() const {
 		unsigned int n = bodies.size() + rods.size() + points.size();
-		for (unsigned int i = 0; i < lines.size(); i++)
+		for (unsigned int i = 0; i < lines.size(); i++) {
 			n += r[0].lines[i].pos.size();
-		return n;
+			n += r[0].misc[i].pos.size();
+		} return n;
 	}
 
   private:
@@ -1238,6 +1260,7 @@ class ABScheme : public LocalTimeSchemeBase<1, 5>
 				continue;
 			rd[dst].lines[i].vel = rd[org].lines[i].vel;
 			rd[dst].lines[i].acc = rd[org].lines[i].acc;
+			rd[dst].misc[i].vel = rd[org].misc[i].vel;
 		}
 
 		for (unsigned int i = 0; i < points.size(); i++) {

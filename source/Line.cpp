@@ -34,6 +34,7 @@
 #include "QSlines.hpp"
 #include "Util/Interp.hpp"
 #include <tuple>
+// #include <random>
 
 #ifdef USE_VTK
 #include "Util/VTK_Util.hpp"
@@ -60,10 +61,10 @@ Line::Line(moordyn::Log* log, size_t lineId)
 Line::~Line() {}
 
 real
-Line::getNonlinearE(real l_stretched, real l_unstretched) const
+Line::getNonlinearEA(real l_stretched, real l_unstretched) const
 {
 	if (!nEApoints)
-		return E;
+		return EA;
 
 	real Xi = l_stretched / l_unstretched - 1.0; // strain rate based on inputs
 	if (Xi < 0.0) {
@@ -92,10 +93,10 @@ Line::getNonlinearEI(real curv) const
 }
 
 real
-Line::getNonlinearC(real ld_stretched, real l_unstretched) const
+Line::getNonlinearBA(real ld_stretched, real l_unstretched) const
 {
-	if (!nCpoints)
-		return c;
+	if (!nBApoints)
+		return BA;
 
 	real Xi = ld_stretched / l_unstretched; // stretching/compressing rate
 	real Yi = 0.0;
@@ -128,7 +129,8 @@ Line::setup(int number_in,
             unsigned int NumSegs,
             EnvCondRef env_in,
             shared_ptr<ofstream> outfile_pointer,
-            string channels_in)
+            string channels_in,
+			real dtM0)
 {
 	env = env_in; // set pointer to environment settings object
 	number = number_in;
@@ -138,18 +140,28 @@ Line::setup(int number_in,
 	UnstrLend = 0.0;
 	// assign number of nodes to line
 	N = NumSegs;
+	// save the moordyn internal timestep
+	dtm = dtM0;
 
 	// store passed line properties (and convert to numbers)
 	d = props->d;
 	A = pi / 4. * d * d;
 	rho = props->w / A;
-	E = props->EA / A;
+	ElasticMod = props->ElasticMod;
+	EA = props->EA;
+	EA_D = props->EA_D;
+	alphaMBL = props->alphaMBL;
+	vbeta = props->vbeta;
 	EI = props->EI;
-	BAin = props->c;
+	BAin = props->BA;
+	BA_D = props->BA_D;
 	Can = props->Can;
 	Cat = props->Cat;
 	Cdn = props->Cdn;
 	Cdt = props->Cdt;
+	Cl = props->Cl;
+	dF = props->dF;
+	cF = props->cF;
 
 	// copy in nonlinear stress-strain data if applicable
 	stiffXs.clear();
@@ -157,11 +169,11 @@ Line::setup(int number_in,
 	nEApoints = props->nEApoints;
 	for (unsigned int I = 0; I < nEApoints; I++) {
 		stiffXs.push_back(props->stiffXs[I]);
-		stiffYs.push_back(props->stiffYs[I] / A);
+		stiffYs.push_back(props->stiffYs[I]);
 	}
 
 	// Use the last entry on the lookup table. see Line::initialize()
-	const real EA = nEApoints ? stiffYs.back() / stiffXs.back() * A : props->EA;
+	const real EA = nEApoints ? stiffYs.back() / stiffXs.back() : props->EA;
 	NatFreqCFL::length(UnstrLen / N);
 	NatFreqCFL::stiffness(EA * N / UnstrLen);
 	NatFreqCFL::mass(props->w * UnstrLen / N);
@@ -178,8 +190,8 @@ Line::setup(int number_in,
 	// copy in nonlinear stress-strainrate data if applicable
 	dampXs.clear();
 	dampYs.clear();
-	nCpoints = props->nCpoints;
-	for (unsigned int I = 0; I < nCpoints; I++) {
+	nBApoints = props->nBApoints;
+	for (unsigned int I = 0; I < nBApoints; I++) {
 		dampXs.push_back(props->dampXs[I]);
 		dampYs.push_back(props->dampYs[I]);
 	}
@@ -192,7 +204,10 @@ Line::setup(int number_in,
 	pin.assign(N + 1, 0.0);           // Internal pressure at node points (Pa)
 
 	r.assign(N + 1, vec::Zero());     // node positions [i][x/y/z]
-	rd.assign(N + 1, vec::Zero());    // node positions [i][x/y/z]
+	rd.assign(N + 1, vec::Zero());    // node velocities [i][x/y/z]
+	rdd_old.assign(N + 1, vec::Zero()); // node accelerations previous iteration [i][x/y/z]
+	Misc.assign(N+1, vec::Zero()); // node misc states [i][viv phase/viscoelastic/unused]
+	Miscd.assign(N+1, vec::Zero()); // node misc state derivatives [i][viv phase/viscoelastic/unused]
 	q.assign(N + 1, vec::Zero());     // unit tangent vectors for each node
 	pvec.assign(N + 1, vec::Zero());  // unit normal vectors for each node
 	qs.assign(N, vec::Zero());        // unit tangent vectors for each segment
@@ -215,11 +230,18 @@ Line::setup(int number_in,
 	Ap.assign(N + 1, vec::Zero());   // node added mass forcing (transverse)
 	Aq.assign(N + 1, vec::Zero());   // node added mass forcing (axial)
 	B.assign(N + 1, vec::Zero());    // node bottom contact force
+	Lf.assign(N + 1, vec::Zero());    // viv crossflow lift force
 	Fnet.assign(N + 1, vec::Zero()); // total force on node
 
 	// wave things
 	F.assign(N + 1, 0.0); // VOF scaler for each NODE (mean of two half adjacent
 	                      // segments) (1 = fully submerged, 0 = out of water)
+
+	// Back indexing things for VIV (amplitude disabled, only needed if lift coefficient table is added)
+	// A_int_old.assign(N + 1, 0.0); // running amplitude total, from previous zero crossing of yd
+	// Amp.assign(N + 1, 0.0); // VIV Amplitude updated every zero crossing of crossflow velcoity
+	yd_rms_old.assign(N + 1, 0.0); // node old yd_rms
+	ydd_rms_old.assign(N + 1, 0.0);// node old ydd_rms
 
 	// ensure end moments start at zero
 	endMomentA = vec::Zero();
@@ -236,23 +258,27 @@ Line::setup(int number_in,
 	LOGDBG << "   Set up Line " << number << ". " << endl;
 };
 
-std::pair<std::vector<vec>, std::vector<vec>>
+std::tuple<std::vector<vec>, std::vector<vec>, std::vector<vec>>
 Line::initialize()
 {
 	LOGMSG << "  - Line" << number << ":" << endl
-	       << "    ID: " << number << endl
+	       << "    ID      : " << number << endl
 	       << "    UnstrLen: " << UnstrLen << endl
-	       << "    N   : " << N << endl
-	       << "    d   : " << d << endl
-	       << "    rho : " << rho << endl
-	       << "    E   : " << E << endl
-	       << "    EI  : " << EI << endl
-	       << "    BAin: " << BAin << endl
-	       << "    Can : " << Can << endl
-	       << "    Cat : " << Cat << endl
-	       << "    Cdn : " << Cdn << endl
-	       << "    Cdt : " << Cdt << endl
-	       << "    ww_l: " << ((rho - env->rho_w) * (pi / 4. * d * d)) * 9.81
+	       << "    N       : " << N << endl
+	       << "    d       : " << d << endl
+	       << "    rho     : " << rho << endl
+		   << "    EAMod   : " << ElasticMod << endl
+	       << "    EA      : " << EA << endl
+		   << "    BA      : " << BAin << endl
+	       << "    EI      : " << EI << endl
+	       << "    Can     : " << Can << endl
+	       << "    Cat     : " << Cat << endl
+	       << "    Cdn     : " << Cdn << endl
+	       << "    Cdt     : " << Cdt << endl
+		   << "    Cl      : " << Cl << endl
+		   << "    dF      : " << dF << endl
+		   << "    cF      : " << cF << endl
+	       << "    ww_l    : " << ((rho - env->rho_w) * (pi / 4. * d * d)) * 9.81
 	       << endl;
 
 	if (outfile) {
@@ -300,6 +326,13 @@ Line::initialize()
 			for (unsigned int i = 0; i <= N; i++) {
 				*outfile << "Node" << i << "Dx \t Node" << i << "Dy \t Node"
 				         << i << "Dz \t ";
+			}
+		}
+		// output VIV lift force
+		if (channels.find("V") != string::npos) {
+			for (unsigned int i = 0; i <= N; i++) {
+				*outfile << "Node" << i << "Vx \t Node" << i << "Vy \t Node"
+				         << i << "Vz \t ";
 			}
 		}
 		// output segment tensions
@@ -370,6 +403,11 @@ Line::initialize()
 				for (unsigned int i = 0; i <= 3 * N + 2; i++)
 					*outfile << "(N) \t";
 			}
+			// output VIV force
+			if (channels.find("V") != string::npos) {
+				for (unsigned int i = 0; i <= 3 * N + 2; i++)
+					*outfile << "(N) \t";
+			}
 			// output segment tensions?
 			if (channels.find("t") != string::npos) {
 				for (unsigned int i = 0; i < N; i++)
@@ -436,21 +474,21 @@ Line::initialize()
 		// For the sake of the following initialization steps, if using a
 		// nonlinear stiffness model, set the stiffness based on the last
 		// entries in the lookup table
-		E = stiffYs.back() / stiffXs.back();
+		EA = stiffYs.back() / stiffXs.back();
 	}
 
 	// process internal damping input
 	if (BAin < 0) {
 		// automatic internal damping option (if negative BA provided (stored as
-		// BAin), then -BAin indicates desired damping ratio)
-		c = -BAin * UnstrLen / N * sqrt(E * rho); // rho = w/A
-		LOGMSG << "Line " << number << " damping set to " << c
-		       << " Ns = " << c * A << " Pa-s, based on input of " << BAin
+		// BAin), then -BAin indicates desired damping ratio [unitless])
+		BA = -BAin * UnstrLen / N * sqrt(EA * rho * A); // rho = w/A. Units: no unit * m * sqrt(kg-m/s^2 *kg/m) = Ns 
+		LOGMSG << "Line " << number << " damping set to " << BA / A
+		       << " Pa-s = " << BA << " Ns, based on input of " << BAin
 		       << endl;
 	} else {
 		// otherwise it's the regular internal damping coefficient, which should
 		// be divided by area to get a material coefficient
-		c = BAin / A;
+		BA = BAin;
 	}
 
 	// initialize line node positions as distributed linearly between the
@@ -463,7 +501,7 @@ Line::initialize()
 	// catenary routine (from FAST v.7)
 
 	real XF = dir(Eigen::seqN(0, 2)).norm(); // horizontal spread
-	if (XF > 0.0) {
+	if (XF > 0.0001) { // tolerance for calculation of XF when points are not along x or y axis
 		// Check if the line touches the seabed, so we are modelling it. Just
 		// the end points are checked
 		const real Tol = 1e-5;
@@ -497,7 +535,7 @@ Line::initialize()
 		int success = Catenary(XF,
 		                       ZF,
 		                       UnstrLen,
-		                       E * A,
+		                       EA,
 		                       LW,
 		                       CB,
 		                       Tol,
@@ -528,12 +566,22 @@ Line::initialize()
 		LOGDBG << "Vertical linear initial profile for Line " << number << endl;
 	}
 
-	LOGMSG << "Initialized Line " << number << endl;
-
 	// also assign the resulting internal node positions to the integrator
 	// initial state vector! (velocities leave at 0)
 	std::vector<vec> vel(N - 1, vec::Zero());
-	return std::make_pair(vector_slice(r, 1, N - 1), vel);
+	// inital viv state vector (phase,amplitude,smoothed amplitude)
+	std::vector<vec> misc(N+1, vec::Zero());
+	/// give a random distribution between 0 and 2pi for inital phase of lift force to avoid initial transient
+	if (Cl > 0.0) {
+		std::vector<moordyn::real> phase_range(N+1);
+		for (unsigned int i = 0; i < N+1; i++) phase_range[i] = (i/moordyn::real(N))*2*pi;
+		// shuffle(phase_range.begin(),phase_range.end(),random_device());
+		for (unsigned int i = 0; i < N+1; i++) misc[i][0] = phase_range[i];
+	}
+
+	LOGMSG << "Initialized Line " << number << endl;
+
+	return std::make_tuple(vector_slice(r, 1, N - 1), vel, misc);
 };
 
 real
@@ -666,16 +714,17 @@ Line::setPin(std::vector<real> p)
 }
 
 void
-Line::setState(const std::vector<vec>& pos, const std::vector<vec>& vel)
+Line::setState(const std::vector<vec>& pos, const std::vector<vec>& vel, const std::vector<vec>& misc)
 {
-	if ((pos.size() != N - 1) || (vel.size() != N - 1)) {
+	if ((pos.size() != N - 1) || (vel.size() != N - 1) || (misc.size() != N + 1)) {
 		LOGERR << "Invalid input size" << endl;
 		throw moordyn::invalid_value_error("Invalid input size");
 	}
 
-	// set interior node positions and velocities based on state vector
+	// set interior node positions and velocities and all misc states based on state vector
 	std::copy(pos.begin(), pos.end(), r.begin() + 1);
 	std::copy(vel.begin(), vel.end(), rd.begin() + 1);
+	std::copy(misc.begin(), misc.end(), Misc.begin() + 1); // Misc[i][0,1,2] correspond to viv phase, viscoelastic, unused.
 }
 
 void
@@ -768,7 +817,7 @@ Line::getEndSegmentMoment(EndPoints end_point, EndPoints rod_end_point) const
 }
 
 void
-Line::getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc)
+Line::getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc, std::vector<vec>& misc)
 {
 	// NOTE:
 	// Jose Luis Cercos-Pita: This is by far the most consuming function of the
@@ -790,33 +839,7 @@ Line::getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc)
 
 	// dt is possibly used for stability tricks...
 
-	// -------------------- calculate various kinematic quantities
-	// ---------------------------
-	for (unsigned int i = 0; i < N; i++) {
-		// calculate current (Stretched) segment lengths and unit tangent
-		// vectors (qs) for each segment (this is used for bending calculations)
-		lstr[i] = unitvector(qs[i], r[i], r[i + 1]);
-
-		ldstr[i] = qs[i].dot(rd[i + 1] - rd[i]); // strain rate of segment
-
-		// V[i] = A * l[i]; // volume attributed to segment
-
-		if (nEApoints)
-			E = getNonlinearE(lstr[i], l[i]);
-
-		if (lstr[i] > l[i]) {
-			T[i] = E * A * (lstr[i] - l[i]) / l[i] * qs[i];
-		} else {
-			// cable can't "push" ...
-			// or can it, if bending stiffness is nonzero? <<<<<<<<<
-			T[i] = vec::Zero();
-		}
-
-		// line internal damping force
-		if (nCpoints)
-			c = getNonlinearC(ldstr[i], l[i]);
-		Td[i] = c * A * ldstr[i] / l[i] * qs[i];
-	}
+	// ======= calculate various kinematic quantities and stiffness forces =======
 
 	// calculate unit tangent vectors (q) for each internal node. note: I've
 	// reversed these from pointing toward 0 rather than N. Check sign of wave
@@ -835,6 +858,77 @@ Line::getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc)
 		unitvector(q[0], r[0], r[1]);
 	if ((endTypeB == PINNED) || !isEI)
 		unitvector(q[N], r[N - 1], r[N]);
+
+	// loop through the segments for stiffness forces and segment lengths
+	for (unsigned int i = 0; i < N; i++) {
+		// calculate current (Stretched) segment lengths and unit tangent
+		// vectors (qs) for each segment (this is used for bending and stiffness calculations)
+		lstr[i] = unitvector(qs[i], r[i], r[i + 1]);
+
+		ldstr[i] = qs[i].dot(rd[i + 1] - rd[i]); // strain rate of segment
+
+		// V[i] = A * l[i]; // volume attributed to segment
+
+		// Calculate segment stiffness
+		if (ElasticMod == 1) {
+			// line tension
+			if (nEApoints > 0)
+				EA = getNonlinearEA(lstr[i], l[i]);
+
+			if (lstr[i] / l[i] > 1.0) {
+				T[i] = EA * (lstr[i] - l[i]) / l[i] * qs[i];
+			} else {
+				// cable can't "push" ...
+				// or can it, if bending stiffness is nonzero? <<<<<<<<<
+				T[i] = vec::Zero();
+			}
+
+			// line internal damping force
+			if (nBApoints > 0)
+				BA = getNonlinearBA(ldstr[i], l[i]);
+			Td[i] = BA * ldstr[i] / l[i] * qs[i];
+
+		} else if (ElasticMod > 1){ // viscoelastic model from https://asmedigitalcollection.asme.org/OMAE/proceedings/IOWTC2023/87578/V001T01A029/1195018 
+			// note that Misc[i][1] is the same as Line%dl_1 in MD-F. This is the deltaL of the first static spring k1.
+               
+			if (ElasticMod == 2) {
+               // constant dynamic stiffness
+               EA_2 = EA_D;
+
+            } else if (ElasticMod == 3){
+            	if (Misc[i][1] >= 0.0) // spring k1 is in tension
+                	// Mean load dependent dynamic stiffness: from combining eqn. 2 and eqn. 10 from original MD viscoelastic paper, taking mean load = k1 delta_L1 / MBL, and solving for k_D using WolframAlpha with following conditions: k_D > k_s, (MBL,alpha,beta,unstrLen,delta_L1) > 0
+                	EA_2 = 0.5 * ((alphaMBL) + (vbeta*Misc[i][1]*(EA / l[i])) + EA + sqrt((alphaMBL * alphaMBL) + (2*alphaMBL*(EA / l[i]) * (vbeta*Misc[i][1] - l[i])) + ((EA / l[i])*(EA / l[i]) * (vbeta*Misc[i][1] + l[i])*(vbeta*Misc[i][1] + l[i]))));
+            	
+				else // spring k1 is in compression
+                	EA_2 = alphaMBL; // mean load is considered to be 0 in this case. The second term in the above equation is not valid for delta_L1 < 0.
+            }
+
+            if (EA_2 == 0.0) { // Make sure EA_2 != 0 or else nans, also make sure EA != EA_D or else nans. 
+               LOGERR << "Viscoelastic model: Dynamic stiffness cannot equal zero" << endl;
+			   throw moordyn::invalid_value_error("Viscoelastic model: Dynamic stiffness cannot equal zero");
+			} else if (EA_2 == EA) {
+               LOGERR << "Viscoelastic model: Dynamic stiffness cannot equal static stiffness" << endl;
+			   throw moordyn::invalid_value_error("Viscoelastic model: Dynamic stiffness cannot equal static stiffness");
+			}
+         
+            const real EA_1 = EA_2*EA/(EA_2 - EA); // calculated EA_1 which is the stiffness in series with EA_D that will result in the desired static stiffness of EA_S. 
+         
+            const real dl = lstr[i] - l[i]; // delta l of this segment
+         
+            const real ld_1 = (EA_2*dl - (EA_2 + EA_1)*Misc[i][1] + BA_D*ldstr[i]) /( BA_D + BA); // rate of change of static stiffness portion [m/s]
+
+            if (dl >= 0.0) // if both spring 1 (the spring dashpot in parallel) and the whole segment are not in compression
+               T[i]  = (EA_1*Misc[i][1] / l[i]) * qs[i];  // compute tension based on static portion (dynamic portion would give same). See eqn. 14 in paper
+            else 
+               T[i] = vec::Zero(); // cable can't "push"
+
+            Td[i] = BA*ld_1 / l[i] * qs[i];
+
+            // update state derivative for static stiffness stretch
+			Miscd[i][1] = ld_1;
+		}
+	}
 
 	// calculate the curvatures and normal vectors (just if needed)
 	if (isEI || isPb) {
@@ -890,8 +984,7 @@ Line::getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc)
 	}
 	//============================================================================================
 
-	// ============  CALCULATE FORCES ON EACH NODE
-	// ===============================
+	// ============  CALCULATE FORCES ON EACH NODE  ===============================
 
 	// Bending loads
 	// first zero out the forces from last run
@@ -1095,18 +1188,25 @@ Line::getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc)
 		M[i] = m_i * I + rho_w * v_i * (Can * (I - Q) + Cat * Q);
 
 		// submerged weight (including buoyancy)
+
+		// submerged weight (including buoyancy)
 		W[i][0] = W[i][1] = 0.0;
 		W[i][2] = -g * (m_i - v_i * rho_w);
 
+
+		// magnitude of current
+		const real Ui_mag = U[i].norm();
+		// Unit vector of current flow
+		const vec Ui_hat = U[i].normalized();
 		// relative flow velocity over node
 		const vec vi = U[i] - rd[i];
 		// tangential relative flow component
-		// <<<<<<< check sign since I've reversed q
 		const real vql = vi.dot(q[i]);
 		const vec vq = vql * q[i];
 		// transverse relative flow component
 		const vec vp = vi - vq;
 
+		// magnitudes of relative flow
 		const real vq_mag = vq.norm();
 		const real vp_mag = vp.norm();
 
@@ -1116,6 +1216,65 @@ Line::getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc)
 		// tangential drag
 		Dq[i] = vq_mag * Cdt * pi * shared_part * vq;
 
+		// Vortex Induced Vibration (VIV) cross-flow lift force
+		if ((Cl > 0.0) && (!IC_gen)) { // If non-zero lift coefficient and not during IC_gen then VIV to be calculated
+
+			// ----- The Synchronization Model ------
+			// Crossflow velocity
+			const real yd = rd[i].dot(q[i].cross(vp.normalized()));
+			const real ydd = rdd_old[i].dot(q[i].cross(vp.normalized()));
+
+			// Rolling RMS calculation
+			const real yd_rms = sqrt((((n_m-1)*yd_rms_old[i]*yd_rms_old[i])+(yd*yd))/n_m); // RMS approximation from Thorsen
+			const real ydd_rms = sqrt((((n_m-1)*ydd_rms_old[i]*ydd_rms_old[i])+(ydd*ydd))/n_m);
+
+			if ((t >= t_old + dtm) || (t == 0.0)) { // Update the stormed RMS vaues
+				// update back indexing one moordyn time step (regardless of time integration scheme). T_old is handled at end of getStateDeriv when rdd_old is updated.
+				yd_rms_old[i] = yd_rms; // for rms back indexing (one moordyn timestep back)
+				ydd_rms_old[i] = ydd_rms; // for rms back indexing (one moordyn timestep back)
+			}
+
+			if ((yd_rms==0.0) || (ydd_rms == 0.0)) phi_yd = atan2(-ydd, yd); // To avoid divide by zero
+			else phi_yd = atan2(-ydd/ydd_rms, yd/yd_rms); 
+			
+			if (phi_yd < 0) phi_yd = 2*pi + phi_yd; // atan2 to 0-2Pi range
+
+			// Note: amplitude calculations and states commented out. Would be needed if a Cl vs A lookup table was ever implemented
+
+			const real phi = Misc[i][0] - (2 * pi * floor(Misc[i][0] / (2*pi))); // Map integrated phase to 0-2Pi range. Is this necessary? sin (a-b) is the same if b is 100 pi or 2pi
+			// const real A_int = Misc[i][1];
+			// const real As = Misc[i][2];
+
+			// non-dimensional frequency
+			const real f_hat = cF + dF *sin(phi_yd - phi); // phi is integrated from state deriv phi_dot
+			// frequency of lift force (rad/s)
+			const real phi_dot = 2*pi*f_hat*vp_mag / d;// to be added to state
+
+			// ----- The rest of the model -----
+
+			// // Oscillation amplitude 
+			// const real A_int_dot = abs(yd);
+			// // Note: Check if this actually measures zero crossings
+			// if ((yd * yd_old[i]) < 0) { // if sign changed, i.e. a zero crossing
+			// 	Amp[i] = A_int-A_int_old[i]; // amplitude calculation since last zero crossing
+			// 	A_int_old[i] = A_int; // stores amplitude of previous zero crossing for finding Amp
+			// }
+			// // Careful with integrating smoothed amplitude, as 0.1 was a calibarated value based on a very simple integration method
+			// const real As_dot = (0.1/dtm)*(Amp[i]-As); // As to be variable integrated from the state. stands for amplitude smoothed
+
+			// // Lift coefficient from lookup table
+			// const real C_l = cl_lookup(x = As/d); // create function in Line.hpp that uses lookup table 
+
+			// The Lift force
+			Lf[i] = 0.5 * env->rho_w * d * vp_mag * Cl * cos(phi) * q[i].cross(vp) * submerged_length;
+
+			// Prep for returning VIV state derivatives
+			Miscd[i][0] = phi_dot;
+			// Miscd[i][2] = As_dot; // unused state that could be used for future amplitude calculations
+
+		}	
+
+		// tangential component of fluid acceleration
 		// <<<<<<< check sign since I've reversed q
 		const real aql = Ud[i].dot(q[i]);
 		const vec aq = aql * q[i];
@@ -1173,7 +1332,7 @@ Line::getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc)
 		else
 			Fnet[i] = T[i] - T[i - 1] + Td[i] - Td[i - 1];
 		Fnet[i] += W[i] + (Dp[i] + Dq[i] + Ap[i] + Aq[i]) + B[i] +
-			Bs[i] + Pb[i];
+			Bs[i] + Lf[i] + Pb[i];
 	}
 
 	// loop through internal nodes and compute the accelerations
@@ -1186,6 +1345,12 @@ Line::getStateDeriv(std::vector<vec>& vel, std::vector<vec>& acc)
 		acc[i - 1] = M[i].inverse() * Fnet[i];
 		vel[i - 1] = rd[i];
 	}
+
+	if ((t >= t_old + dtm) || (t == 0.0)) { // update back indexing one moordyn time step (regardless of time integration scheme)
+		t_old = t; // for updating back indexing if statements 
+	}
+	rdd_old = acc; // saving the acceleration for VIV RMS calculation
+
 };
 
 // write output file for line  (accepts time parameter since retained time value
@@ -1243,6 +1408,15 @@ Line::Output(real time)
 			for (unsigned int i = 0; i <= N; i++) {
 				for (int J = 0; J < 3; J++)
 					*outfile << Dp[i][J] + Dq[i][J] + Ap[i][J] + Aq[i][J]
+					         << "\t ";
+			}
+		}
+
+		// output VIV force (only CF for now)
+		if (channels.find("V") != string::npos) {
+			for (unsigned int i = 0; i <= N; i++) {
+				for (int J = 0; J < 3; J++)
+					*outfile << Lf[i][J]
 					         << "\t ";
 			}
 		}
